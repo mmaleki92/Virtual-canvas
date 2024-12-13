@@ -5,6 +5,9 @@ import imutils
 from scipy.interpolate import splprep, splev
 from abc import ABC, abstractmethod
 from typing import List
+from copy import copy
+from pynput import keyboard
+from keyboard_manager import KeyboardManager
 
 class Point:
     def __init__(self, x: int, y: int):
@@ -27,7 +30,7 @@ class Segment:
 def get_ip_img():
     url = "http://172.18.84.72:8080/shot.jpg"  # Replace with your URL
     try:
-        img_resp = requests.get(url)
+        img_resp = requests.get(url, timeout=100)
         img_resp.raise_for_status()
         img_arr = np.array(bytearray(img_resp.content), dtype=np.uint8)
         img = cv2.imdecode(img_arr, -1)
@@ -53,7 +56,6 @@ def create_color_mask(hsv_img, color, tolerance):
 
 
 def find_contours(img, img_result, tolerance, sampled_color):
-    # img_result = img.copy()
     draw_it = False
     hsv_img = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     mask = create_color_mask(hsv_img, sampled_color, tolerance)
@@ -78,7 +80,6 @@ def find_contours(img, img_result, tolerance, sampled_color):
             draw_it = True
             # sampled_points.append((cx, cy)) 
             # layer.add_points((cx, cy))
-            # print(cx, cy)
             return draw_it, cx, cy
     return draw_it, _, _
 
@@ -93,13 +94,13 @@ class Curve:
         """Optional: Apply smoothing (e.g., spline interpolation)."""
         if len(self.points) < 3:
             return self.points  # Not enough points to smooth
-        try:
-            pts = np.array([[p.x, p.y] for p in self.points])
-            tck, u = splprep(pts.T, s=1)
-            x_new, y_new = splev(np.linspace(0, 1, max(50, len(pts) * 10)), tck)
-        except Exception as e:
-            print(e)
-            return self.points
+        # try:
+        pts = np.array([[p.x, p.y] for p in self.points])
+        tck, u = splprep(pts.T, s=1)
+        x_new, y_new = splev(np.linspace(0, 1, max(50, len(pts) * 10)), tck)
+        # except Exception as e:
+        #     print(e)
+        #     return self.points
         return [Point(int(x), int(y)) for x, y in zip(x_new, y_new)]
 
 
@@ -188,7 +189,7 @@ def drawlines(original_img, lines):
             return img
         except:
             return original_img
-    
+
 class Application:
     def __init__(self):
         self.canvas = Canvas()
@@ -196,12 +197,17 @@ class Application:
         self.sampled_color = None
         self.sampling_mode = True
         self.sampled_points = []
-
+        self.all_points = {"current": [],
+                           "previous": [],
+                           }
         # Initialize the image
-        _, self.img = get_ip_img()
+        self.sucess, self.img = get_ip_img()
+        # Initialize the keyboard manager
+        self.kb_manager = KeyboardManager()
+        self.kb_manager.start()
 
     def update_image(self):
-        _, self.img = get_ip_img()
+        self.sucess, self.img = get_ip_img()
 
     def run(self):
         cv2.namedWindow("Canvas")
@@ -210,24 +216,44 @@ class Application:
 
         while True:
             self.update_image()
+            if not self.sucess:
+                return
             img_copy = self.img.copy()
-            self.canvas.draw(img_copy)
+
 
             if self.sampling_mode:
                 cv2.putText(img_copy, "Click to sample a color", (10, 30),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
             else:
                 draw_it, x, y = find_contours(self.img, img_copy, tolerance, self.sampled_color)
-                self.sampled_points.append([x, y])
-            cv2.imshow("Canvas", img_copy)
+                self.all_points["current"].append([x, y])
+                
+                # self.sampled_points.append([x, y])
 
             key = cv2.waitKey(1) & 0xFF
-            if key == ord('q'):  # Quit
+
+            self.canvas.draw(img_copy)
+
+            if self.kb_manager.is_key_pressed(keyboard.Key.esc):
+                print("Exiting...")
                 break
-            elif key == ord('n'):  # New layer
-                self.canvas.add_layer(Layer(f"Layer {len(self.canvas.layers) + 1}"))
-            elif key == ord('d'):  # Draw lines based on points
+            elif self.kb_manager.is_key_pressed('d'):
                 self.draw_segments_and_curves()
+            elif self.kb_manager.is_key_pressed('n'):
+                self.canvas.add_layer(Layer(f"Layer {len(self.canvas.layers) + 1}"))
+            else:
+                self.all_points["previous"] = copy(self.all_points["current"])
+                self.all_points["current"] = []
+            print(len(self.all_points["current"]))
+            # key = cv2.waitKey(1) & 0xFF
+            # if key == ord('q'):  # Quit
+            #     break
+            # elif key == ord('n'):  # New layer
+            #     self.canvas.add_layer(Layer(f"Layer {len(self.canvas.layers) + 1}"))
+            # elif key == ord('d'):  # Draw lines based on points
+            #     self.draw_segments_and_curves()
+            cv2.imshow("Canvas", img_copy)
+            
 
         cv2.destroyAllWindows()
 
@@ -240,15 +266,15 @@ class Application:
 
         if active_layer:
             # Add sampled points as a segment
-            if self.sampled_points:
+            if self.all_points["current"]:
                 segment = Segment()
-                for x, y in self.sampled_points:
+                for x, y in self.all_points["current"]:
                     segment.add_point(Point(x, y))
                 active_layer.add_segment(segment)
 
             # Convert the segment into a curve and smooth it
             curve = Curve()
-            for x, y in self.sampled_points:
+            for x, y in self.all_points["current"]:
                 curve.add_point(Point(x, y))
             active_layer.add_curve(curve)
 
@@ -267,9 +293,9 @@ class Application:
                     self.sampled_color = self.detect_color(img, x, y)
                     self.sampling_mode = False
                     print(f"Sampled color HSV: {self.sampled_color}")
-            else:
-                self.sampled_points.append((x, y))
-                print(f"Point added at ({x}, {y}). Current points: {self.sampled_points}")
+            # else:
+            #     self.all_points[].append((x, y))
+            #     print(f"Point added at ({x}, {y}). Current points: {self.sampled_points}")
 
     def detect_color(self, img, x, y):
         hsv_img = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
